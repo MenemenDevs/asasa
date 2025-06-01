@@ -3,11 +3,58 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-// Fonksiyon prototipleri
+// === Pin Tanımları ===
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define JOY_X_PIN    34
+#define JOY_Y_PIN    35
+#define JOY_BTN_PIN   4
+#define BUZZER_PIN   21
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// === Oyun Türü ===
+enum GameType { SNAKE, FLAPPY, BOUNCE, GAME_COUNT };
+const char* gameNames[GAME_COUNT] = {"Snake", "Flappy Bird", "Bounce Ball"};
+GameType selectedGame = SNAKE;
+bool inMenu = true;
+
+// === Snake ===
+#define CELL_SIZE 4
+#define MAX_LENGTH 100
+struct Point { int x; int y; };
+Point snake[MAX_LENGTH];
+int length = 3, dx = 1, dy = 0;
+Point food;
+unsigned long lastMove = 0;
+int speed = 150;
+bool playingSnake = false;
+
+// === Flappy ===
+int birdY = SCREEN_HEIGHT / 2;
+int velocity = 0;
+const int gravity = 1;
+int pipeX = SCREEN_WIDTH;
+int gapY;
+const int gapHeight = 20;
+int flappyScore = 0;
+bool playingFlappy = false;
+
+// === Bounce ===
+int ballX = SCREEN_WIDTH / 2;
+int ballY = SCREEN_HEIGHT / 2;
+int ballDX = 2;
+int ballDY = 2;
+bool playingBounce = false;
+
+unsigned long lastUpdate = 0;
+const int frameDelay = 40;
+
+// === Fonksiyon Prototipleri ===
 void drawMenu();
 void handleMenuInput();
 void startSnake();
-void readSnakeButtons();
+void readSnakeJoystick();
 void moveSnake();
 void drawSnake();
 void spawnFood();
@@ -20,69 +67,18 @@ void readBounceInput();
 void updateBounce();
 void drawBounce();
 void gameOver();
-
-// OLED ekran ayarları
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-// Buton pinleri
-#define BTN_UP     14
-#define BTN_DOWN   12
-#define BTN_LEFT   13
-#define BTN_RIGHT  27
-
-// Oyun türleri
-enum GameType { SNAKE, FLAPPY, BOUNCE, GAME_COUNT };
-const char* gameNames[GAME_COUNT] = {"Snake", "Flappy Bird", "Bounce Ball"};
-GameType selectedGame = SNAKE;
-bool inMenu = true;
-
-// === SNAKE ===
-#define CELL_SIZE 4
-#define MAX_LENGTH 100
-struct Point { int x; int y; };
-Point snake[MAX_LENGTH];
-int length = 3, dx = 1, dy = 0;
-Point food;
-unsigned long lastMove = 0;
-int speed = 150;
-bool playingSnake = false;
-
-// === FLAPPY ===
-int birdY = SCREEN_HEIGHT / 2;
-int velocity = 0;
-const int gravity = 1;
-int pipeX = SCREEN_WIDTH;
-int gapY;
-const int gapHeight = 20;
-int flappyScore = 0;
-bool playingFlappy = false;
-
-// === BOUNCE BALL ===
-int ballX = SCREEN_WIDTH / 2;
-int ballY = SCREEN_HEIGHT / 2;
-int ballDX = 2;
-int ballDY = 2;
-bool playingBounce = false;
-
-unsigned long lastUpdate = 0;
-const int frameDelay = 40;
+void beep();
 
 void setup() {
   Serial.begin(115200);
-  pinMode(BTN_UP, INPUT_PULLUP);
-  pinMode(BTN_DOWN, INPUT_PULLUP);
-  pinMode(BTN_LEFT, INPUT_PULLUP);
-  pinMode(BTN_RIGHT, INPUT_PULLUP);
+  pinMode(JOY_BTN_PIN, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
 
-  Wire.begin(25, 26); // SDA, SCL
+  Wire.begin(25, 26);
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("SSD1306 allocation failed");
+    Serial.println("SSD1306 init failed");
     for (;;);
   }
-
   display.clearDisplay();
   display.display();
   randomSeed(analogRead(0));
@@ -94,7 +90,7 @@ void loop() {
     handleMenuInput();
   } else if (playingSnake) {
     if (millis() - lastMove > speed) {
-      readSnakeButtons();
+      readSnakeJoystick();
       moveSnake();
       drawSnake();
       lastMove = millis();
@@ -114,31 +110,33 @@ void loop() {
   }
 }
 
-// ===== MENU =====
+// === Menü ===
 void drawMenu() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(WHITE);
-
   for (int i = 0; i < GAME_COUNT; i++) {
     display.setCursor(0, i * 10);
-    if (i == selectedGame) display.print("> ");
-    else display.print("  ");
+    display.print(i == selectedGame ? "> " : "  ");
     display.println(gameNames[i]);
   }
   display.display();
 }
 
 void handleMenuInput() {
-  if (digitalRead(BTN_UP) == LOW) {
+  int y = analogRead(JOY_Y_PIN);
+  if (y < 1000) {
     selectedGame = (GameType)((selectedGame - 1 + GAME_COUNT) % GAME_COUNT);
+    beep();
     delay(200);
   }
-  if (digitalRead(BTN_DOWN) == LOW) {
+  if (y > 3000) {
     selectedGame = (GameType)((selectedGame + 1) % GAME_COUNT);
+    beep();
     delay(200);
   }
-  if (digitalRead(BTN_LEFT) == LOW || digitalRead(BTN_RIGHT) == LOW) {
+  if (digitalRead(JOY_BTN_PIN) == LOW) {
+    beep();
     switch (selectedGame) {
       case SNAKE: startSnake(); break;
       case FLAPPY: startFlappy(); break;
@@ -148,13 +146,12 @@ void handleMenuInput() {
   }
 }
 
-// ===== SNAKE =====
+// === Snake ===
 void startSnake() {
   inMenu = false;
   playingSnake = true;
   playingFlappy = false;
   playingBounce = false;
-
   length = 3; dx = 1; dy = 0;
   snake[0] = {10, 10};
   snake[1] = {9, 10};
@@ -162,23 +159,23 @@ void startSnake() {
   spawnFood();
 }
 
-void readSnakeButtons() {
-  if (digitalRead(BTN_UP) == LOW && dy == 0)   { dx = 0; dy = -1; }
-  if (digitalRead(BTN_DOWN) == LOW && dy == 0) { dx = 0; dy = 1; }
-  if (digitalRead(BTN_LEFT) == LOW && dx == 0) { dx = -1; dy = 0; }
-  if (digitalRead(BTN_RIGHT) == LOW && dx == 0){ dx = 1; dy = 0; }
+void readSnakeJoystick() {
+  int x = analogRead(JOY_X_PIN);
+  int y = analogRead(JOY_Y_PIN);
+  if (x < 1000 && dx == 0) { dx = -1; dy = 0; }
+  if (x > 3000 && dx == 0) { dx = 1; dy = 0; }
+  if (y < 1000 && dy == 0) { dx = 0; dy = -1; }
+  if (y > 3000 && dy == 0) { dx = 0; dy = 1; }
 }
 
 void moveSnake() {
   Point newHead = {snake[0].x + dx, snake[0].y + dy};
   if (newHead.x < 0 || newHead.x >= SCREEN_WIDTH / CELL_SIZE || newHead.y < 0 || newHead.y >= SCREEN_HEIGHT / CELL_SIZE) {
-    gameOver();
-    return;
+    gameOver(); return;
   }
   for (int i = 0; i < length; i++) {
     if (snake[i].x == newHead.x && snake[i].y == newHead.y) {
-      gameOver();
-      return;
+      gameOver(); return;
     }
   }
   for (int i = length; i > 0; i--) snake[i] = snake[i - 1];
@@ -204,13 +201,12 @@ void spawnFood() {
   food.y = random(0, SCREEN_HEIGHT / CELL_SIZE);
 }
 
-// ===== FLAPPY BIRD =====
+// === Flappy ===
 void startFlappy() {
   inMenu = false;
   playingSnake = false;
   playingFlappy = true;
   playingBounce = false;
-
   birdY = SCREEN_HEIGHT / 2;
   velocity = 0;
   pipeX = SCREEN_WIDTH;
@@ -219,7 +215,7 @@ void startFlappy() {
 }
 
 void readFlappyInput() {
-  if (digitalRead(BTN_UP) == LOW) {
+  if (digitalRead(JOY_BTN_PIN) == LOW) {
     velocity = -4;
   }
 }
@@ -251,13 +247,12 @@ void drawFlappy() {
   display.display();
 }
 
-// ===== BOUNCE BALL =====
+// === Bounce ===
 void startBounce() {
   inMenu = false;
   playingSnake = false;
   playingFlappy = false;
   playingBounce = true;
-
   ballX = SCREEN_WIDTH / 2;
   ballY = SCREEN_HEIGHT / 2;
   ballDX = 2;
@@ -265,8 +260,9 @@ void startBounce() {
 }
 
 void readBounceInput() {
-  if (digitalRead(BTN_LEFT) == LOW) ballDX = -2;
-  else if (digitalRead(BTN_RIGHT) == LOW) ballDX = 2;
+  int x = analogRead(JOY_X_PIN);
+  if (x < 1000) ballDX = -2;
+  else if (x > 3000) ballDX = 2;
 }
 
 void updateBounce() {
@@ -285,14 +281,14 @@ void drawBounce() {
   display.display();
 }
 
-// ===== GAME OVER =====
+// === GAME OVER ===
 void gameOver() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(20, 25);
   display.println("GAME OVER!");
   display.setCursor(10, 40);
-  display.println("Press LEFT or RIGHT");
+  display.println("Press Btn...");
   display.display();
 
   playingSnake = false;
@@ -301,12 +297,18 @@ void gameOver() {
   inMenu = false;
 
   while (true) {
-    if (digitalRead(BTN_LEFT) == LOW || digitalRead(BTN_RIGHT) == LOW) {
+    if (digitalRead(JOY_BTN_PIN) == LOW) {
+      beep();
       delay(300);
       inMenu = true;
       break;
     }
   }
 }
-// End of file
-// This code implements a simple game menu and three games (Snake, Flappy Bird, Bounce Ball) on an ESP32 with an OLED display.
+
+// === Buzzer ===
+void beep() {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(80);
+  digitalWrite(BUZZER_PIN, LOW);
+}
